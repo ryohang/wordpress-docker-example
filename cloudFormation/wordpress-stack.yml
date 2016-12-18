@@ -5,7 +5,7 @@ Parameters:
     Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
     Type: String
     Default: example.key
-	Description: "Choose your EC2 keypair to launch instances"
+    Description: "Choose your EC2 keypair to launch instances"
   VpcId:
     Type: AWS::EC2::VPC::Id
     Description: Select a VPC that allows instances to access the Internet.
@@ -99,7 +99,7 @@ Resources:
       - Name: proxy
         Memory: 400
         Essential: false
-        Image: !Ref 'RepositoryURI'/proxy
+        Image: !Join ['',[!Ref 'RepositoryURI', '/proxy' ]]
         Links:
         - blog:blog.awsmeter.io
         PortMappings:
@@ -108,7 +108,7 @@ Resources:
         Cpu: 300
         Memory: 400
         Essential: true
-        Image: !Ref 'RepositoryURI'/blog
+        Image: !Join ['',[!Ref 'RepositoryURI', '/blog' ]]
   ECSBlogALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
