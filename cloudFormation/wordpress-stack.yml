@@ -1,0 +1,396 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: String
+    Default: example.key
+	Description: "Choose your EC2 keypair to launch instances"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select a VPC that allows instances to access the Internet.
+  InternetFacingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Select your security group id open 80 and 443 to 0.0.0.0/0 such as sg-xxxxxx
+    Default: sg-xxxxxx
+  OutBoundSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Select your security group id outbound open to 0.0.0.0/0 for yum package udpate such as sg-xxxxxx
+    Default: sg-xxxxx
+  SSLCertificationARN:
+    Type: String
+    Description: Please copy&paste your SSL certification ARN from ACM(Certification Manager)
+    Default: arn:aws:acm:us-east-1:xxxxxxxxxx:certificate/xxxxx-xxxxx-xxxxx-xxxxx
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select public subnets in your VPC for internet facing
+    Default: subnet-xxxxxxxx,subnet-xxxxxxx
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select private subnets in your VPC internal server
+    Default: subnet-xxxxxx,subnet-xxxxx
+  RepositoryURI:
+    Type: String
+    Description: Your container repository URI	
+  DesiredCapacity:
+    Type: Number
+    Default: '2'
+    Description: Number of instances to launch in your ECS cluster.
+  MinSize:
+    Type: Number
+    Default: '2'
+    Description: Minimum number of instances that can be launched in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: '4'
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  InstanceType:
+    Description: The EC2 instance type
+    Type: String
+    Default: m4.large
+    AllowedValues:
+    - c3.large
+    - c3.2xlarge
+    - c4.large
+    - c4.xlarge
+    - c4.2xlarge
+    - i2.xlarge
+    - m3.medium
+    - m3.large
+    - m3.xlarge
+    - m4.large
+    - m4.xlarge
+    - m4.2xlarge
+    - r3.large
+    - r3.xlarge
+    - r3.2xlarge
+    - r4.large
+    - r4.xlarge
+    - r4.2xlarge
+    ConstraintDescription: Grab any available instance type in the spot market
+  ECSSpotPrice:
+    Description: Spot price for application AutoScaling Group
+    Type: Number
+    Default: '0.05'
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-eca289fb
+Resources:
+  MeterCluster:
+    Type: AWS::ECS::Cluster
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Security Group
+      VpcId: !Ref 'VpcId'
+  EcsSecurityGroupALBports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '31000'
+      ToPort: '61000'
+      SourceSecurityGroupId: !Ref 'EcsSecurityGroup'
+  blogTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+      - Name: proxy
+        Memory: 400
+        Essential: false
+        Image: !Ref 'RepositoryURI'/proxy
+        Links:
+        - blog:blog.awsmeter.io
+        PortMappings:
+        - ContainerPort: 80
+      - Name: blog
+        Cpu: 300
+        Memory: 400
+        Essential: true
+        Image: !Ref 'RepositoryURI'/blog
+  ECSBlogALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ECSBlogALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets: !Ref 'PublicSubnets'
+      SecurityGroups:
+      - !Ref 'InternetFacingSecurityGroup'
+      - !Ref 'OutBoundSecurityGroup'
+      - !Ref 'EcsSecurityGroup' 
+  BlogALBHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSBlogTG'
+      LoadBalancerArn: !Ref 'ECSBlogALB'
+      Port: 80
+      Protocol: HTTP
+  BlogALBHTTPListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: BlogALBHTTPListener
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSBlogTG'
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/"
+      ListenerArn: !Ref 'BlogALBHTTPListener'
+      Priority: 1
+  BlogALBHTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      Certificates:
+      - CertificateArn: !Ref 'SSLCertificationARN'
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSBlogTG'
+      LoadBalancerArn: !Ref 'ECSBlogALB'
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-2015-05
+  BlogALBHTTPSListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: BlogALBHTTPSListener
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'ECSBlogTG'
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/"
+      ListenerArn: !Ref 'BlogALBHTTPSListener'
+      Priority: 1
+  ECSBlogTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: 
+      - ECSBlogALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /elb-status
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: blogProxyContainerTG
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VpcId'
+      TargetGroupAttributes:
+      - Key: stickiness.enabled
+        Value: true
+      - Key: stickiness.lb_cookie.duration_seconds
+        Value: 86400
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref 'PrivateSubnets'
+      LaunchConfigurationName: !Ref 'MeterClusterInstanceLaunchConfig'
+      MinSize: !Ref 'MinSize'
+      MaxSize: !Ref 'MaxSize'
+      DesiredCapacity: !Ref 'DesiredCapacity'
+      Tags:
+      - Key: Name
+        Value: MeterCluster-Instance
+        PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '2'
+        MaxBatchSize: '1'
+        PauseTime: PT10M
+        WaitOnResourceSignals: 'true'
+  MeterClusterInstanceLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            01_add_instance_to_cluster:
+               command: !Join ['',['#!/bin/bash\necho ECS_CLUSTER=', !Ref 'MeterCluster',' >> /etc/ecs/ecs.config\n' ]]
+          files:
+            /etc/cfn/cfn-hup.conf:
+               content: !Sub |
+                 [main]
+                 stack=${AWS::StackId}
+                 region=${AWS::Region}
+               mode: '000400'
+               owner: 'root'
+               group: 'root'
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+               content: !Sub |
+                 [cfn-auto-reloader-hook]
+                 triggers=post.update
+                 path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+                 action=/opt/aws/bin/cfn-init -s --stack ${AWS::StackId} --resource MeterClusterInstanceLaunchConfig --region ${AWS::Region}
+               mode: '000400'
+               owner: 'root'
+               group: 'root'
+          services:
+            sysvinit:
+               cfn-hup:
+                 enabled: 'true'
+                 ensureRunning: 'true'
+                 files:
+                    - "/etc/cfn/cfn-hup.conf"
+                    - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+    Properties:
+      ImageId: !FindInMap [ AWSRegionToAMI, !Ref 'AWS::Region', AMIID]
+      InstanceType: !Ref 'InstanceType'
+      SpotPrice: !Ref 'ECSSpotPrice'
+      IamInstanceProfile: !Ref 'EC2InstanceProfile'
+      KeyName: !Ref 'KeyName'
+      SecurityGroups: [!Ref 'EcsSecurityGroup', !Ref 'OutBoundSecurityGroup','sg-18663b65','sg-1f336a62']
+      AssociatePublicIpAddress: false
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${MeterCluster} >> /etc/ecs/ecs.config
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource MeterClusterInstanceLaunchConfig --region ${AWS::Region}
+          /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+  blogService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - BlogALBHTTPListener
+      - BlogALBHTTPSListener
+    Properties:
+      Cluster: !Ref 'MeterCluster'
+      DesiredCount: '2'
+      LoadBalancers:
+        - ContainerName: proxy
+          ContainerPort: '80'
+          TargetGroupArn: !Ref 'ECSBlogTG'
+      Role: !Ref 'ECSServiceRole'
+      TaskDefinition: !Ref 'blogTaskDefinition'
+  blogServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: blogService
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 1
+      ResourceId: !Join ['', [service/, !Ref 'MeterCluster', /, !GetAtt [blogService, Name]]]
+      RoleARN: !GetAtt [AutoscalingRole, Arn]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  blogServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: AStepPolicy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'blogServiceScalingTarget'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 200
+  BlogALB500sAlarmScaleUp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: Average
+      Threshold: '10'
+      AlarmDescription: Alarm if our ALB generates too many HTTP 500s.
+      Period: '60'
+      AlarmActions: [!Ref 'blogServiceScalingPolicy']
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+      - Name: ECSService
+        Value: !Ref 'blogService'
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: HTTPCode_ELB_5XX_Count
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:  ['elasticloadbalancing:DeregisterInstancesFromLoadBalancer', 'elasticloadbalancing:DeregisterTargets',
+              'elasticloadbalancing:Describe*', 'elasticloadbalancing:RegisterInstancesWithLoadBalancer',
+              'elasticloadbalancing:RegisterTargets', 'ec2:Describe*', 'ec2:AuthorizeSecurityGroupIngress']
+            Resource: "*"
+  AutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [application-autoscaling.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: service-autoscaling
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['application-autoscaling:*', 'cloudwatch:DescribeAlarms', 'cloudwatch:PutMetricAlarm',
+              'ecs:DescribeServices', 'ecs:UpdateService']
+            Resource: '*'
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - ecs:DeregisterContainerInstance
+            - ecs:DiscoverPollEndpoint
+            - ecs:Poll
+            - ecs:RegisterContainerInstance
+            - ecs:StartTelemetrySession
+            - ecs:Submit*
+            - ecs:CreateCluster
+            - ecr:BatchCheckLayerAvailability
+            - ecr:BatchGetImage
+            - ecr:GetDownloadUrlForLayer
+            - ecr:GetAuthorizationToken
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: "*"
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [!Ref 'EC2Role']
+Outputs:
+  blogUrl:
+    Value: !Ref 'ECSBlogALB'
