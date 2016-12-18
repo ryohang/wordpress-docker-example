@@ -1,0 +1,23 @@
+version: '2'
+
+services:
+  proxy-awsmeter-io:
+    image: example-proxy
+    restart: always
+    ports:
+     - "80:80"
+     - "443:443"
+    links:
+     - blog:blog.awsmeter.io
+ 
+  blog:
+    image: example-blog
+    restart: always
+    links:
+     - blog-db:db-blog.awsmeter.io
+
+  blog-db:
+    image: mariadb
+    restart: always
+    environment:
+     - MYSQL_ROOT_PASSWORD=password
